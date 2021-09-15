@@ -91,8 +91,12 @@ def plot_accuracy(fde_data, method, label, color, style):
 
         true_negative_rate.append(tn / (tn + fp))
         false_positive_rate.append(fp / (fp + tn))
-        false_negative_rate.append(fn / (fn + tp))
-        true_positive_rate.append(tp / (tp + fn))
+        if (tp + fn) == 0:
+            false_negative_rate.append(0.)
+            true_positive_rate.append(1.)
+        else:
+            false_negative_rate.append(fn / (fn + tp))
+            true_positive_rate.append(tp / (tp + fn))
 
         balanced_accuracy.append(100*(true_positive_rate[-1]
                             + true_negative_rate[-1])/2.)
