@@ -1,34 +1,34 @@
 ########################################################################
 # Author(s):    D. Knowles
 # Date:         11 Aug 2021
-# Desc:         runs FDE methods with EKF implementation on TU Chemnitz
-#               dataset
+# Desc:         runs FDE methods with EKF implementation on google
+#               android dataset
 ########################################################################
 
 import os
 import csv
 import time
 import random
-import itertools
 import numpy as np
 import progress.bar
 import pandas as pd
 
 from src.utils import prep_logs
 import lib.coordinates as coord
+from lib.android import make_gnss_dataframe
 from src.edm_fde import edm_from_satellites_ranges, edm_fde
 
 ####################################################################
 # PARAMETERS
 ####################################################################
 
-# how many measurement rows to process
+# how many measurement rows to calculate
 # -1 means keep all measurements
 MEASUREMENTS_HEAD = -1
 
-# probability that an error is added
-ERROR_PROBABILITY = 0.25
-random.seed(0)
+# ground truth fault indicator. Residuals with absolute value higher
+# than this will be marked faulty.
+FAULT_THRESHOLD = 100
 
 # global parameters for the FDE methods
 FDE_PARAMETERS = {
@@ -48,18 +48,19 @@ FDE_PARAMETERS = {
 ####################################################################
 
 class EKF():
-    def __init__(self, error_addition, fde_parameters, fault_hypothesis,
+    def __init__(self, trace_name, phone_type, fde_parameters,
                  log_names, verbose = False):
         """Exteded Kalman filter for gnss measurements.
 
         Parameters
         ----------
-        error_addition : float
-            Amount of bias to add to measurements
+        trace_name : string
+            Provided name for trace, e.g., "2020-05-14-US-MTV-1".
+        phone_type : string
+            Type of phone used to record data, e.g., "Pixel4",
+            "Pixel4XL", "Pixel4XLModded", "Mi8".
         fde_parameters : dict
             FDE parameters to add to the FDE_PARAMETERS dictionary
-        fault_hypothesis : int
-            Number of faults hypothesized
         log_names : list
             Strings that get added to the name log
         verbose : bool
@@ -67,32 +68,26 @@ class EKF():
 
         """
 
-        print("Analyzing trace with",error_addition,"error added...")
-
-        self.ERROR_ADDITION = error_addition
+        print("Analyzing trace ", trace_name, phone_type, "...")
 
         # append added FDE parameters to FDE_PARAMETERS
         for key, value in fde_parameters.items():
             FDE_PARAMETERS[key] = value
 
-        self.FAULT_HYPOTHESIS = fault_hypothesis
-
         # update log name
         self.log_names = log_names
-        if self.log_names[1] == "timing":
-            self.log_names.append(str(int(fault_hypothesis)))
         self.log_names.append(str(int(MEASUREMENTS_HEAD)))
-        self.log_names.append(str(int(self.ERROR_ADDITION)))
+        self.log_names.append(str(int(FAULT_THRESHOLD)))
 
         repo_dir = os.path.dirname(
                    os.path.dirname(
                    os.path.realpath(__file__)))
 
-        data_path = os.path.join(repo_dir,"data","chemnitz","frankfurt2")
-
+        data_path = os.path.join(repo_dir,"data","google","train")
 
         # load measurements
-        input_filepath = os.path.join(data_path, "derived.csv")
+        input_filepath = os.path.join(data_path, trace_name, phone_type,
+                                      phone_type + "_derived.csv")
         measurements = pd.read_csv(input_filepath)
 
         # crop measurements according to MEASUREMENTS_HEAD parameter
@@ -110,8 +105,52 @@ class EKF():
                                + measurements["svid"].astype(str)
 
         # load ground truth
-        gt_filepath = os.path.join(data_path, "ground_truth.csv")
+        gt_filepath = os.path.join(data_path, trace_name, phone_type,
+                                      "ground_truth.csv")
         gt = pd.read_csv(gt_filepath)
+
+        meas_times = []
+
+        ####################################################################
+        # MULTIPLE FIXES FROM DATA HOSTS
+        # code copied from
+        # https://www.kaggle.com/gymf123/tips-notes-from-the-competition-hosts
+        ####################################################################
+
+        # load raw measurements
+        input_filepath = os.path.join(data_path, trace_name, phone_type,
+                                      phone_type + "_GnssLog.txt")
+        df_raw, android_fixes = make_gnss_dataframe(input_filepath, True)
+
+        # Create a new column in df_raw that corresponds to df_derived['MillisSinceGpsEpoch']
+        df_raw['millisSinceGpsEpoch'] = np.floor( (df_raw['TimeNanos'] - df_raw['FullBiasNanos']) / 1000000.0).astype(int)
+
+        # Change each value in df_derived['MillisSinceGpsEpoch'] to be the prior epoch.
+        raw_timestamps = df_raw['millisSinceGpsEpoch'].unique()
+        derived_timestamps = measurements['millisSinceGpsEpoch'].unique()
+
+        # The timestamps in derived are one epoch ahead. We need to map each epoch
+        # in derived to the prior one (in Raw).
+        indexes = np.searchsorted(raw_timestamps, derived_timestamps)
+        from_t_to_fix_derived = dict(zip(derived_timestamps, raw_timestamps[indexes-1]))
+        measurements['millisSinceGpsEpoch'] = np.array(list(map(lambda v: from_t_to_fix_derived[v], measurements['millisSinceGpsEpoch'])))
+
+        # remove 61m bias in ground truth
+        gt.loc[:,"heightAboveWgs84EllipsoidM"] -= 61.
+
+        # remove duplicated signals that produce outliers
+        delta_millis = measurements['millisSinceGpsEpoch'] - measurements['receivedSvTimeInGpsNanos'] / 1e6
+
+        where_good_signals = (delta_millis > 0) & (delta_millis < 300)
+
+        measurements = measurements[where_good_signals].copy()
+
+        measurements.reset_index(drop=True,inplace=True)
+
+        ####################################################################
+        # END OF FIXES
+        ####################################################################
+
         gt_lla = np.vstack((gt["latDeg"],gt["lngDeg"],
                             gt["heightAboveWgs84EllipsoidM"])).T
         gt_ecef = coord.geodetic2ecef(gt_lla)
@@ -140,6 +179,8 @@ class EKF():
         # store measurements and gt in class variables
         self.gt = gt
         self.measurements = measurements
+        self.trace_name = trace_name
+        self.phone_type = phone_type
 
         # initialize state vector [ x, y, z ]
         self.mu = {}
@@ -154,7 +195,6 @@ class EKF():
         first_key = list(FDE_PARAMETERS.keys())[0]
         self.gt_history = self.mu[first_key][0].copy()
         self.mu_n = self.mu[first_key][0].shape[0]
-        # self.wls_history[method] = self.mu[method].copy()
 
         # initialize covariance matrix
         self.P = {}
@@ -255,6 +295,7 @@ class EKF():
         # setup progress bar
         bar = progress.bar.IncrementalBar('Progress:', max=self.epochs)
 
+        # Ephemeris calculation and Newton-Raphson solution
         nr_lla = []
         nr_ecef = []
         meas_times = []
@@ -266,29 +307,20 @@ class EKF():
 
             data.reset_index(drop=True,inplace=True)
 
-            # need at least five satellites for exclusion
-            if len(data) < 4 + self.FAULT_HYPOTHESIS:
+            # need at least six satellites for exclusion
+            if len(data) < 6:
                 bar.next() # progress bar
                 continue
 
-            # add error biases
-            if random.random() < ERROR_PROBABILITY and self.ERROR_ADDITION > 0:
-                add_error = True
-                data, ri = self.add_bias(data.copy(),self.gt.copy())
-                errors_added += 1
-            else:
-                ri = None
-                add_error = False
-
             # calculate ground truth fault status
-            epoch_gt, mu_gt = self.calc_gt(data.copy(),self.gt.copy(),ri)
+            epoch_gt, mu_gt = self.calc_gt(data.copy(),self.gt.copy())
 
             gt_indexes = set(epoch_gt[epoch_gt["fault"] == False].index)
+            faults_exist = len(epoch_gt[epoch_gt["fault"] == True]) > 0
 
             # compute EKF updates
             for method in list(FDE_PARAMETERS.keys()):
                 for param in FDE_PARAMETERS[method]:
-                    # EKF predict step
                     self.predict_simple(method, param)
 
                     input_data = data.copy()
@@ -302,18 +334,18 @@ class EKF():
                     elif method == "edm":
                         new_data = self.run_edm_fde(input_data, param, False)
                     elif method == "residual":
-                        new_data = self.run_residual_fde(input_data, param)
+                        new_data = self.run_residual_fde(input_data, param, False)
                     elif method == "solution":
                         new_data = self.run_solution_fde(input_data, param, False)
 
                     time1 = time.time()
 
-                    if len(data) not in self.timing_history[method]:
-                        self.timing_history[method][len(data)] = [time1-time0]
-                    else:
-                        self.timing_history[method][len(data)].append(time1-time0)
+                    if len(epoch_gt[epoch_gt["fault"] == True]) <= 1:
+                        if len(data) not in self.timing_history[method]:
+                            self.timing_history[method][len(data)] = [time1-time0]
+                        else:
+                            self.timing_history[method][len(data)].append(time1-time0)
 
-                    # EKF update step
                     self.update_gnss(new_data, method, param)
 
                     self.mu_history[method][param] = np.hstack((self.mu_history[method][param],
@@ -337,7 +369,6 @@ class EKF():
             self.gt_history = np.hstack((self.gt_history,
                                          mu_gt.reshape(-1,1)))
 
-
             bar.next() # progress bar
 
         bar.finish() # end progress bar
@@ -352,7 +383,7 @@ class EKF():
 
         return self.log_dir
 
-    def calc_gt(self, data, gt, ri):
+    def calc_gt(self, data, gt):
         """Calculate ground truth fault status.
 
         Parameters
@@ -361,8 +392,6 @@ class EKF():
             contains measurement information
         gt : pd.DataFrame
             ground truth position dataframe
-        ri : list
-            indexes of ground truth faults
 
         Returns
         -------
@@ -416,89 +445,12 @@ class EKF():
                                - gt_psuedoranges \
                                - rb
 
-        data["fault"] = False
-        if ri != None:
-            data.loc[ri,"fault"] = True
+
+        data["fault"] = abs(data["residual"]) > FAULT_THRESHOLD
 
         mu_gt = np.concatenate((gt_ecef,np.array([rb])))
 
         return data, mu_gt
-
-    def add_bias(self, data, gt):
-        """Calculate ground truth fault status
-
-        Parameters
-        ----------
-        data : pd.DataFrame
-            contains measurement information
-        gt : pd.DataFrame
-            ground truth position dataframe
-
-        Returns
-        -------
-        data : pd.DataFrame
-            contains measurement information now with pseudoranges with
-            added biases
-        fault_indexes : list
-            ground truth fault indexes
-
-        """
-        epoch_gt = gt.iloc[abs(gt["millisSinceGpsEpoch"]
-                 - data.loc[data.first_valid_index(),
-                            "millisSinceGpsEpoch"]).argsort()[0]]
-        gt_ecef = np.array([epoch_gt["ecefxM"],
-                            epoch_gt["ecefyM"],
-                            epoch_gt["ecefzM"]]).T
-
-        # calculate "truth psuedorange"
-        sat_pos = np.hstack((data["xSatPosM"].to_numpy().reshape(-1,1),
-                             data["ySatPosM"].to_numpy().reshape(-1,1),
-                             data["zSatPosM"].to_numpy().reshape(-1,1)))
-        gt_pos = np.tile(gt_ecef,(sat_pos.shape[0],1))
-
-        gt_psuedoranges = np.linalg.norm(gt_pos - sat_pos, axis = 1)
-
-        # calculate receiver clock bias
-        rb = 0.0
-        rb = self.least_squares(gt_ecef,rb,data,True)
-
-        # calculate residual
-        data.loc[:,"residual"] = data["correctedPrM"].to_numpy() \
-                               + data["satClkBiasM"].to_numpy() \
-                               - gt_psuedoranges \
-                               - rb
-
-        # recalculate receiver clock bias
-        residual_mean = data["residual"].mean()
-        residual_std = data["residual"].std()
-        distance_from_mean = abs(data["residual"] - residual_mean)
-        data_rb = data[distance_from_mean <= residual_std]
-
-        # calculate receiver clock bias
-        rb = 0.0
-        rb = self.least_squares(gt_ecef,rb,data_rb,True)
-
-        data["rbM"] = rb
-
-        # calculate residual
-        data.loc[:,"residual"] = data["correctedPrM"].to_numpy() \
-                               + data["satClkBiasM"].to_numpy() \
-                               - gt_psuedoranges \
-                               - rb
-
-        fault_indexes = []
-        fault_options = data[data["residual"] > 2]
-        if len(fault_options) < self.FAULT_HYPOTHESIS:
-            fault_options = data.sort_values("residual")
-            fault_indexes = list(fault_options.index)[:self.FAULT_HYPOTHESIS]
-        else:
-            riis = list(fault_options.index)
-            random.shuffle(riis)
-            fault_indexes = riis[:self.FAULT_HYPOTHESIS]
-
-        data.loc[fault_indexes,"correctedPrM"] += self.ERROR_ADDITION
-
-        return data, fault_indexes
 
     def least_squares(self, x_est, rb, data, stationary = False,
                       for_ss = False):
@@ -582,10 +534,7 @@ class EKF():
             return rb
         else:
             if for_ss:
-                try:
-                    sigma2 = np.trace(np.linalg.inv(G.T.dot(G)))
-                except:
-                    sigma2 = np.trace(np.linalg.pinv(G.T.dot(G)))
+                sigma2 = np.trace(np.linalg.inv(G.T.dot(G)))
                 return x_est, rb, sigma2
             else:
                 return x_est, rb
@@ -623,12 +572,14 @@ class EKF():
 
         # EDM FDE
         dims = 3
-        edm_faults = edm_fde(D, dims, self.FAULT_HYPOTHESIS, threshold, verbose)
+        edm_faults = edm_fde(D, dims, 1, threshold, verbose)
+        if verbose:
+            print("edm faults: ",edm_faults)
         data.drop(edm_faults, inplace = True)
 
         return data
 
-    def run_residual_fde(self, data, threshold):
+    def run_residual_fde(self, data, threshold, verbose = False):
         """Residual-based FDE.
 
         Parameters
@@ -637,6 +588,8 @@ class EKF():
             DataFrame that contains information from the measurements
         threshold : float
             detection threshold
+        verbose : bool
+            If True, prints extra debugging statements
 
         Returns
         -------
@@ -658,7 +611,6 @@ class EKF():
                                - gt_psuedoranges \
                                - self.mu["residual"][threshold][-1]
 
-
         residuals = data.loc[:,"residual"].to_numpy().reshape(-1,1)
 
         # test statistic
@@ -666,20 +618,34 @@ class EKF():
                      / (len(data) - 4) )
 
         # iterate through subsets if r is above detection threshold
-        if r > threshold:
+        if r > 10.:
             ri = set()
+            r_subsets = []
             for ss in range(len(data)):
                 residual_subset = np.delete(residuals,ss,axis=0)
                 r_subset = np.sqrt(residual_subset.T.dot(residual_subset)[0,0] \
                              / (len(data) - 4) )
-                if r_subset < threshold + 2.:
+                if verbose:
+                    r_subsets.append(r_subset)
+                # adjusted threshold metric
+                if r_subset/r < threshold:
                     ri.add(ss)
 
-            if len(ri) == 1:
-                residual_data = data[data.index != ri.pop()]
-            else:
+            if len(ri) >= 1:
+                # residual_data = data[data.index not in list(ri)]
+                residual_data = data.drop(list(ri))
+            elif len(ri) == 0:
+                if verbose:
+                    print("r: ",r)
+                    print("ri: ",ri)
+                    for rri, rrr in enumerate(residuals):
+                        print(rri, rrr, r_subsets[rri]/r)
                 residual_data = data.copy()
         else:
+            if verbose:
+                print("r: ",r)
+                for rri, rrr in enumerate(residuals):
+                    print(rri, rrr)
             residual_data = data.copy()
 
         return residual_data
@@ -706,6 +672,7 @@ class EKF():
             Updated DataFrame with measurement faults indicated.
 
         """
+        solution_list = np.zeros((4,len(data)))
 
         wls_x = self.mu_history["solution"][threshold][:3,-1]
         wls_rb = self.mu_history["solution"][threshold][-1,-1]
@@ -716,26 +683,27 @@ class EKF():
 
         full_solution = np.concatenate((full_x, np.array([full_rb]))).copy()
 
-        drop_combos = list(itertools.combinations(list(data.index),
-                                                  self.FAULT_HYPOTHESIS))
-        normalizers = np.zeros((len(drop_combos),))
-        solution_list = np.zeros((4,len(drop_combos)))
 
-        for ss, drop_combo in enumerate(drop_combos):
-            sub_data = data.drop(list(drop_combo), inplace = False)
+        normalizers = np.zeros((len(data),))
+
+        for ss, sub in enumerate(list(data.index)):
+            sub_data = data[data.index != sub]
 
             x_sub, rb_sub, sigmai = self.least_squares(wls_x,
                                             wls_rb,
                                             sub_data,False,True)
 
             sub_solution = np.concatenate((x_sub, np.array([rb_sub])))
+
             solution_list[:,ss] = sub_solution.copy()
             normalizers[ss] = sigmai
 
-        full_matrix = np.tile(full_solution,(len(drop_combos),1)).T
+        full_matrix = np.tile(full_solution,(len(data),1)).T
         mean_diff = np.linalg.norm(solution_list - full_matrix,axis=0)
         normalizers = np.sqrt(normalizers - sigma0)
         test_statistic = np.divide(mean_diff,normalizers)
+
+
 
         if recursion:
             return np.sum(test_statistic > threshold) > 0
@@ -748,23 +716,9 @@ class EKF():
             if not recurse_results:
                 solution_data = sub_data.copy()
             else:
-                if verbose:
-                    print("recursion fail")
-                    print("sigma0:",sigma0)
-                    print("mean_diff:\n",mean_diff)
-                    print("normalizers\n",normalizers)
-                    print("test_statistic\n",test_statistic)
-                    print("\n",np.max(mean_diff))
                 solution_data = data.copy()
 
         else:
-            if verbose:
-                print("threshold fail")
-                print("sigma0:",sigma0)
-                print("mean_diff:\n",mean_diff)
-                print("normalizers\n",normalizers)
-                print("test_statistic\n",test_statistic)
-                print("\n",np.max(mean_diff))
             solution_data = data.copy()
 
         return solution_data
@@ -775,8 +729,8 @@ class EKF():
         """
 
         for method in list(FDE_PARAMETERS.keys()):
-            csv_filename = os.path.join(self.log_dir, "derived" + "-" \
-                        + "frakfurt2" + "-" + method \
+            csv_filename = os.path.join(self.log_dir, self.trace_name + "-" \
+                        + self.phone_type + "-" + method \
                         + "-ekf.csv")
 
 
@@ -805,8 +759,8 @@ class EKF():
         """
 
         for method in list(FDE_PARAMETERS.keys()):
-            csv_filename = os.path.join(self.log_dir, "derived" + "-" \
-                        + "frankfurt2" + "-" + method \
+            csv_filename = os.path.join(self.log_dir, self.trace_name + "-" \
+                        + self.phone_type + "-" + method \
                         + "-timing.csv")
 
 

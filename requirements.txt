@@ -2,12 +2,5 @@
 numpy
 pandas
 progress
-matplotlib
-
-# read_nmea.py
-pynmea2
 datetime
-
-# ephemeris_manager.py
-unlzw3
-georinex
+matplotlib
