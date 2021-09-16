@@ -1,6 +1,6 @@
 # EDM-FDE
 
-This repository contains code for Euclidean Distance Matrix-based Fault Detection and Exclussion (FDE) based on the paper "Euclidean Distance Matrix-based Rapid Fault Detection and Exclusion" from the ION GNSS+ 2021 conference.
+This repository contains code for Euclidean Distance Matrix-based Fault Detection and Exclusion (FDE) based on the paper "Euclidean Distance Matrix-based Rapid Fault Detection and Exclusion" from the ION GNSS+ 2021 conference.
 
 ## Install
 
