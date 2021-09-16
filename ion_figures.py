@@ -38,9 +38,6 @@ def main():
                       ]
     chemnitz_table(file_dir, chemnitz_traces)
 
-    # compute google table of results
-    google_table(file_dir, "google_fde_-1_100")
-
     # create fault hypothesis timing graph
     chemnitz_timing = [
                        "chemnitz_timing_1_-1_50",
@@ -48,6 +45,9 @@ def main():
                        "chemnitz_timing_3_-1_50",
                       ]
     plot_chemnitz_timing(file_dir,chemnitz_timing)
+
+    # compute google table of results
+    google_table(file_dir, "google_fde_-1_100")
 
     # create measurement count timing graph
     google_timing = "google_timing_-1_100"

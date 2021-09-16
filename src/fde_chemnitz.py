@@ -583,7 +583,10 @@ class EKF():
             return rb
         else:
             if for_ss:
-                sigma2 = np.trace(np.linalg.inv(G.T.dot(G)))
+                try:
+                    sigma2 = np.trace(np.linalg.inv(G.T.dot(G)))
+                except:
+                    sigma2 = np.trace(np.linalg.pinv(G.T.dot(G)))
                 return x_est, rb, sigma2
             else:
                 return x_est, rb
