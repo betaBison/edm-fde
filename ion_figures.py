@@ -403,7 +403,7 @@ def plot_chemnitz_timing(file_dir, trace_list):
     colors = ["#b1040e","#006cb8","#008566"]
     styles = ["-","--",":"]
 
-    fig = plt.figure()
+    fig, ax = plt.subplots()
     fig.set_size_inches(4,4)
     for ii, method in enumerate(methods):
         # print("method: ",method)
@@ -427,6 +427,8 @@ def plot_chemnitz_timing(file_dir, trace_list):
     plt.yscale("log")
     plt.ylabel("Average Computation Time [ms]")
     plt.xlabel("Number of Faults")
+    ax.set_xticks([1,2,3])
+    ax.set_xticks([1,2,3])
     fig.tight_layout()
     fig.savefig(os.path.join("log","figures","chemnitz_timing.png"),
             format="png",
@@ -505,6 +507,10 @@ def plot_google_timing(file_dir, directory):
                 label = labels[2]
             plt.plot(key_list,avg_times,label=label, color=color,
                     linewidth=3.0, linestyle = style)
+            a,b = np.polyfit(key_list, avg_times, 1)
+            plt.plot(key_list, a*np.array(key_list)+b, color=color,
+                     linewidth=1.0)
+            print("line fit m,x for",method,":",a,b)
     plt.legend()
     plt.yscale("log")
     plt.ylabel("Average Computation Time [ms]")
