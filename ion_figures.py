@@ -492,19 +492,24 @@ def plot_google_timing(file_dir, directory):
             plot_values = np.array(timing_dict[key])
             key_list.append(key)
             avg_times.append(1000*np.mean(np.array(plot_values)))
-        if method in ["residual","edm","solution"]:
+        if method in ["edm","residual","solution"]:
             if method == "edm":
                 color = colors[0]
                 style = styles[0]
                 label = labels[0]
+                edm_avg_times = avg_times.copy()
             elif method == "residual":
                 color = colors[1]
                 style = styles[1]
                 label = labels[1]
+                residual_edm = np.mean(np.array(avg_times)/np.array(edm_avg_times))
+                print("Avg speedup of EDM over residual:",residual_edm)
             elif method == "solution":
                 color = colors[2]
                 style = styles[2]
                 label = labels[2]
+                solution_edm = np.mean(np.array(avg_times)/np.array(edm_avg_times))
+                print("Avg speedup of EDM over solution:",solution_edm)
             plt.plot(key_list,avg_times,label=label, color=color,
                     linewidth=3.0, linestyle = style)
             a,b = np.polyfit(key_list, avg_times, 1)
